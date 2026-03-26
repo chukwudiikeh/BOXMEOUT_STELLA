@@ -1,13 +1,38 @@
 use soroban_sdk::{contract, contractimpl, Address, Env, String, Vec};
 
 use crate::errors::PredictionMarketError;
+use crate::storage::DataKey;
 use crate::types::{
     AmmPool, Config, Dispute, FeeConfig, LpPosition, Market, MarketMetadata, MarketStats,
     OracleReport, TradeReceipt, UserPosition,
 };
+use crate::events;
 
 #[contract]
 pub struct PredictionMarketContract;
+
+fn load_config(env: &Env) -> Result<Config, PredictionMarketError> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::Config)
+        .ok_or(PredictionMarketError::NotInitialized)
+}
+
+fn store_config(env: &Env, config: &Config) {
+    env.storage().persistent().set(&DataKey::Config, config);
+}
+
+fn validate_fee_config(fee_config: &FeeConfig) -> Result<(), PredictionMarketError> {
+    let total_bps = fee_config.protocol_fee_bps as u64
+        + fee_config.lp_fee_bps as u64
+        + fee_config.creator_fee_bps as u64;
+
+    if total_bps > 10_000 {
+        return Err(PredictionMarketError::FeesTooHigh);
+    }
+
+    Ok(())
+}
 
 #[contractimpl]
 impl PredictionMarketContract {
@@ -70,7 +95,20 @@ impl PredictionMarketContract {
         env: Env,
         new_fee_config: FeeConfig,
     ) -> Result<(), PredictionMarketError> {
-        todo!("Implement fee config update")
+        let mut config = load_config(&env)?;
+        config.admin.require_auth();
+
+        validate_fee_config(&new_fee_config)?;
+
+        let protocol_fee_bps = new_fee_config.protocol_fee_bps;
+        let lp_fee_bps = new_fee_config.lp_fee_bps;
+        let creator_fee_bps = new_fee_config.creator_fee_bps;
+
+        config.fee_config = new_fee_config;
+        store_config(&env, &config);
+
+        events::fee_config_updated(&env, protocol_fee_bps, lp_fee_bps, creator_fee_bps);
+        Ok(())
     }
 
     /// Change the treasury address where protocol fees are sent.
@@ -911,5 +949,129 @@ impl PredictionMarketContract {
     /// - Load `DataKey::Config`; return `NotInitialized` if absent.
     pub fn get_config(env: Env) -> Result<Config, PredictionMarketError> {
         todo!("Implement get_config")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::{PredictionMarketContract, PredictionMarketContractClient};
+    use crate::errors::PredictionMarketError;
+    use crate::storage::DataKey;
+    use crate::types::{Config, FeeConfig};
+    use soroban_sdk::testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Events as _};
+    use soroban_sdk::{vec, Address, Env, IntoVal, Symbol};
+
+    fn sample_config(env: &Env, admin: &Address) -> Config {
+        Config {
+            admin: admin.clone(),
+            default_oracle: Address::generate(env),
+            token: Address::generate(env),
+            fee_config: FeeConfig {
+                protocol_fee_bps: 100,
+                lp_fee_bps: 200,
+                creator_fee_bps: 50,
+            },
+            min_liquidity: 1_000,
+            min_trade: 100,
+            max_outcomes: 10,
+            max_market_duration_secs: 86_400,
+            dispute_bond: 500,
+            emergency_paused: false,
+            treasury: Address::generate(env),
+        }
+    }
+
+    fn seed_config(env: &Env, contract_id: &Address, config: &Config) {
+        env.as_contract(contract_id, || {
+            env.storage().persistent().set(&DataKey::Config, config);
+        });
+    }
+
+    fn read_config(env: &Env, contract_id: &Address) -> Config {
+        env.as_contract(contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::Config)
+                .expect("config should exist")
+        })
+    }
+
+    #[test]
+    fn update_fee_config_requires_admin_auth_and_persists_changes() {
+        let env = Env::default();
+        let contract_id = env.register(PredictionMarketContract, ());
+        let client = PredictionMarketContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let config = sample_config(&env, &admin);
+
+        seed_config(&env, &contract_id, &config);
+
+        let new_fee_config = FeeConfig {
+            protocol_fee_bps: 150,
+            lp_fee_bps: 250,
+            creator_fee_bps: 75,
+        };
+
+        env.mock_all_auths();
+        client.update_fee_config(&new_fee_config);
+
+        assert_eq!(
+            env.auths(),
+            std::vec![(
+                        admin.clone(),
+                        AuthorizedInvocation {
+                            function: AuthorizedFunction::Contract((
+                                contract_id.clone(),
+                                Symbol::new(&env, "update_fee_config"),
+                                (&new_fee_config,).into_val(&env),
+                            )),
+                            sub_invocations: std::vec![],
+                }
+            )]
+        );
+
+        assert_eq!(
+            env.events().all(),
+            vec![&env, (
+                contract_id.clone(),
+                vec![&env, Symbol::new(&env, "fee_cfg_upd").into_val(&env)],
+                (150_u32, 250_u32, 75_u32).into_val(&env),
+            )]
+        );
+
+        let stored = read_config(&env, &contract_id);
+        assert_eq!(stored.fee_config.protocol_fee_bps, 150);
+        assert_eq!(stored.fee_config.lp_fee_bps, 250);
+        assert_eq!(stored.fee_config.creator_fee_bps, 75);
+    }
+
+    #[test]
+    fn update_fee_config_rejects_total_bps_over_limit() {
+        let env = Env::default();
+        let contract_id = env.register(PredictionMarketContract, ());
+        let client = PredictionMarketContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let config = sample_config(&env, &admin);
+
+        seed_config(&env, &contract_id, &config);
+
+        let invalid_fee_config = FeeConfig {
+            protocol_fee_bps: 8_000,
+            lp_fee_bps: 1_500,
+            creator_fee_bps: 501,
+        };
+
+        env.mock_all_auths();
+        let result = client.try_update_fee_config(&invalid_fee_config);
+
+        assert_eq!(result, Err(Ok(PredictionMarketError::FeesTooHigh)));
+
+        let stored = read_config(&env, &contract_id);
+        assert_eq!(stored.fee_config.protocol_fee_bps, 100);
+        assert_eq!(stored.fee_config.lp_fee_bps, 200);
+        assert_eq!(stored.fee_config.creator_fee_bps, 50);
+        assert_eq!(env.events().all(), vec![&env]);
     }
 }

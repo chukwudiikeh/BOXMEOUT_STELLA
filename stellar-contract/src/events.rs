@@ -47,7 +47,11 @@ pub fn fee_config_updated(
     lp_fee_bps: u32,
     creator_fee_bps: u32,
 ) {
-    todo!("Emit fee_config_updated event")
+    #[allow(deprecated)]
+    env.events().publish(
+        (Symbol::new(env, "fee_cfg_upd"),),
+        (protocol_fee_bps, lp_fee_bps, creator_fee_bps),
+    );
 }
 
 /// Emitted when the treasury address changes.
