@@ -14,6 +14,7 @@
 /// All values use i128 and a fixed SCALE = 10_000_000 (7 decimal places, matching Stellar stroops).
 
 use crate::types::AmmPool;
+use soroban_sdk::Vec;
 
 /// Fixed-point scale used throughout AMM math to avoid floating-point.
 pub const SCALE: i128 = 10_000_000;
