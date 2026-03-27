@@ -40,6 +40,8 @@ pub enum PredictionMarketError {
     MarketNotReported = 38,
     /// Market is still in its dispute window; cannot finalise yet
     DisputeWindowActive = 39,
+    /// Market is in an unexpected status for the requested operation
+    InvalidMarketStatus = 103,
     /// Market status is invalid for this operation
     InvalidMarketStatus = 40,
 
