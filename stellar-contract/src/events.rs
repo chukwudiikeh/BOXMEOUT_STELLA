@@ -216,7 +216,11 @@ pub fn market_cancelled(env: &Env, market_id: u64, cancelled_by: Address) {
 /// - Topics: [symbol!("mkt_final"), market_id as Symbol]
 /// - Data:   (market_id: u64, winning_outcome_id: u32, finalized_at: u64)
 pub fn market_finalized(env: &Env, market_id: u64, winning_outcome_id: u32) {
-    todo!("Emit market_finalized event")
+    #[allow(deprecated)]
+    env.events().publish(
+        (Symbol::new(env, "mkt_final"), market_id),
+        (market_id, winning_outcome_id, env.ledger().timestamp()),
+    );
 }
 
 /// Emitted when admin uses the emergency resolve bypass.
@@ -230,7 +234,11 @@ pub fn market_emergency_resolved(
     winning_outcome_id: u32,
     admin: Address,
 ) {
-    todo!("Emit market_emergency_resolved event")
+    #[allow(deprecated)]
+    env.events().publish(
+        (Symbol::new(env, "emrg_resolve"), market_id),
+        (market_id, winning_outcome_id, admin),
+    );
 }
 
 // =============================================================================
@@ -272,7 +280,11 @@ pub fn dispute_resolved(
     upheld: bool,
     final_outcome_id: Option<u32>,
 ) {
-    todo!("Emit dispute_resolved event")
+    #[allow(deprecated)]
+    env.events().publish(
+        (Symbol::new(env, "disp_resolved"), market_id),
+        (market_id, upheld, final_outcome_id),
+    );
 }
 
 // =============================================================================
@@ -295,7 +307,19 @@ pub fn shares_bought(
     avg_price_bps: u32,
     total_fees: i128,
 ) {
-    todo!("Emit shares_bought event")
+    #[allow(deprecated)]
+    env.events().publish(
+        (Symbol::new(env, "bought"), market_id, outcome_id),
+        (
+            market_id,
+            buyer,
+            outcome_id,
+            collateral_in,
+            shares_out,
+            avg_price_bps,
+            total_fees,
+        ),
+    );
 }
 
 /// Emitted on every successful `sell_shares` call.
@@ -357,7 +381,8 @@ pub fn position_redeemed(
     outcome_id: u32,
     collateral_out: i128,
 ) {
-    todo!("Emit position_redeemed event")
+    let topics = (Symbol::new(env, "redeemed"), market_id);
+    env.events().publish(topics, (market_id, holder, outcome_id, collateral_out));
 }
 
 /// Emitted when a user is refunded after market cancellation.
@@ -366,7 +391,8 @@ pub fn position_redeemed(
 /// - Topics: [symbol!("refunded"), market_id as Symbol]
 /// - Data:   (market_id: u64, holder: Address, total_refund: i128)
 pub fn position_refunded(env: &Env, market_id: u64, holder: Address, total_refund: i128) {
-    todo!("Emit position_refunded event")
+    let topics = (Symbol::new(env, "refunded"), market_id);
+    env.events().publish(topics, (market_id, holder, total_refund));
 }
 
 /// Emitted once per market successfully redeemed inside a `batch_redeem` call.
@@ -375,7 +401,8 @@ pub fn position_refunded(env: &Env, market_id: u64, holder: Address, total_refun
 /// - Topics: [symbol!("batch_redeem"), market_id as Symbol]
 /// - Data:   (market_id: u64, holder: Address, collateral_out: i128)
 pub fn batch_redeemed(env: &Env, market_id: u64, holder: Address, collateral_out: i128) {
-    todo!("Emit batch_redeemed event")
+    let topics = (Symbol::new(env, "batch_redeem"), market_id);
+    env.events().publish(topics, (market_id, holder, collateral_out));
 }
 
 // =============================================================================
@@ -422,7 +449,11 @@ pub fn liquidity_removed(
 /// - Topics: [symbol!("lp_fees"), market_id as Symbol]
 /// - Data:   (market_id: u64, provider: Address, fees_claimed: i128)
 pub fn lp_fees_claimed(env: &Env, market_id: u64, provider: Address, fees_claimed: i128) {
-    todo!("Emit lp_fees_claimed event")
+    #[allow(deprecated)]
+    env.events().publish(
+        (Symbol::new(env, "lp_fees"), market_id),
+        (market_id, provider, fees_claimed),
+    );
 }
 
 /// Emitted when the protocol treasury collects its fees from a resolved market.
@@ -431,7 +462,11 @@ pub fn lp_fees_claimed(env: &Env, market_id: u64, provider: Address, fees_claime
 /// - Topics: [symbol!("proto_fees"), market_id as Symbol]
 /// - Data:   (market_id: u64, treasury: Address, amount: i128)
 pub fn protocol_fees_collected(env: &Env, market_id: u64, treasury: Address, amount: i128) {
-    todo!("Emit protocol_fees_collected event")
+    #[allow(deprecated)]
+    env.events().publish(
+        (Symbol::new(env, "proto_fees"), market_id),
+        (market_id, treasury, amount),
+    );
 }
 
 /// Emitted when the market creator collects their fees.
@@ -440,5 +475,9 @@ pub fn protocol_fees_collected(env: &Env, market_id: u64, treasury: Address, amo
 /// - Topics: [symbol!("creator_fees"), market_id as Symbol]
 /// - Data:   (market_id: u64, creator: Address, amount: i128)
 pub fn creator_fees_collected(env: &Env, market_id: u64, creator: Address, amount: i128) {
-    todo!("Emit creator_fees_collected event")
+    #[allow(deprecated)]
+    env.events().publish(
+        (Symbol::new(env, "creator_fees"), market_id),
+        (market_id, creator, amount),
+    );
 }

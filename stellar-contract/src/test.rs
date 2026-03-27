@@ -1,19 +1,24 @@
 #![cfg(test)]
 use super::*;
 use soroban_sdk::{testutils::Address as _, Address, Env};
-use crate::types::{Config, FeeConfig};
+use crate::types::{
+    Config, FeeConfig, Market, MarketMetadata, MarketStatus, OracleReport, Outcome, UserPosition,
+};
 use crate::storage::DataKey;
 use crate::prediction_market::{PredictionMarketContract, PredictionMarketContractClient};
 
 fn setup_test(env: &Env) -> (Address, PredictionMarketContractClient) {
-    let contract_id = env.register_contract(None, PredictionMarketContract);
+    let contract_id = env.register(PredictionMarketContract, ());
     let client = PredictionMarketContractClient::new(env, &contract_id);
     let admin = Address::generate(env);
+
+    // Create a test token contract
+    let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
 
     let config = Config {
         admin: admin.clone(),
         default_oracle: Address::generate(env),
-        token: Address::generate(env),
+        token: token.clone(),
         fee_config: FeeConfig {
             protocol_fee_bps: 100,
             lp_fee_bps: 200,
@@ -286,4 +291,356 @@ fn test_pause_unauthorized() {
     create_test_market(&env, &client.address, market_id, &unauthorized_user);
 
     client.pause_market(&unauthorized_user, &market_id);
+}
+
+fn create_resolved_market(env: &Env, client_address: &Address, market_id: u64, creator: &Address, winning_outcome_id: u32) -> Market {
+    let mut market = create_test_market(env, client_address, market_id, creator);
+    market.status = crate::types::MarketStatus::Resolved;
+    market.winning_outcome_id = Some(winning_outcome_id);
+
+    env.as_contract(client_address, || {
+        env.storage().persistent().set(&DataKey::Market(market_id), &market);
+    });
+
+    market
+}
+
+fn create_user_position(env: &Env, client_address: &Address, market_id: u64, outcome_id: u32, holder: &Address, shares: i128) {
+    let position = UserPosition {
+        market_id,
+        outcome_id,
+        holder: holder.clone(),
+        shares,
+        collateral_spent: shares,
+        redeemed: false,
+    };
+
+    env.as_contract(client_address, || {
+        env.storage().persistent().set(&DataKey::UserPosition(market_id, outcome_id, holder.clone()), &position);
+        // maintain the UserMarketPositions index
+        let mut ids: soroban_sdk::Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UserMarketPositions(market_id, holder.clone()))
+            .unwrap_or_else(|| soroban_sdk::Vec::new(env));
+        if !ids.contains(outcome_id) {
+            ids.push_back(outcome_id);
+        }
+        env.storage().persistent().set(&DataKey::UserMarketPositions(market_id, holder.clone()), &ids);
+    });
+}
+
+fn get_token_address(env: &Env, client: &PredictionMarketContractClient) -> Address {
+    env.as_contract(&client.address, || {
+        let config: Config = env.storage().persistent().get(&DataKey::Config).unwrap();
+        config.token
+    })
+}
+
+fn create_reported_market(
+    env: &Env,
+    client_address: &Address,
+    market_id: u64,
+    creator: &Address,
+    dispute_window_secs: u64,
+    reported_at: u64,
+    proposed_outcome_id: u32,
+) -> Market {
+    let mut market = create_test_market(env, client_address, market_id, creator);
+    market.status = MarketStatus::Reported;
+    market.dispute_window_secs = dispute_window_secs;
+    market.total_collateral = 10_000;
+    market.total_lp_shares = 1_000;
+    market.outcomes = soroban_sdk::vec![
+        env,
+        Outcome {
+            id: 0,
+            label: soroban_sdk::String::from_str(env, "Yes"),
+            total_shares_outstanding: 0,
+        },
+        Outcome {
+            id: 1,
+            label: soroban_sdk::String::from_str(env, "No"),
+            total_shares_outstanding: 0,
+        },
+    ];
+
+    let report = OracleReport {
+        market_id,
+        proposed_outcome_id,
+        reported_at,
+        disputed: false,
+        dispute_bond: 0,
+    };
+
+    env.as_contract(client_address, || {
+        env.storage().persistent().set(&DataKey::Market(market_id), &market);
+        env.storage()
+            .persistent()
+            .set(&DataKey::OracleReport(market_id), &report);
+    });
+
+    market
+}
+
+#[test]
+#[should_panic]
+fn test_finalize_resolution_before_window_expires_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, client) = setup_test(&env);
+    let market_id = 77u64;
+
+    create_reported_market(&env, &client.address, market_id, &admin, 3_600, 0, 0);
+
+    client.finalize_resolution(&market_id);
+}
+
+#[test]
+#[should_panic]
+fn test_finalize_resolution_called_twice_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (admin, client) = setup_test(&env);
+    let market_id = 78u64;
+
+    create_reported_market(&env, &client.address, market_id, &admin, 0, 0, 1);
+
+    client.finalize_resolution(&market_id);
+    client.finalize_resolution(&market_id);
+}
+
+#[test]
+#[should_panic]
+fn test_emergency_resolve_non_admin_rejected() {
+    let env = Env::default();
+
+    let (admin, client) = setup_test(&env);
+    let market_id = 79u64;
+
+    // NOTE: intentionally do not call env.mock_all_auths(); this should fail admin auth.
+    create_reported_market(&env, &client.address, market_id, &admin, 0, 0, 0);
+
+    client.emergency_resolve(&market_id, &0u32);
+}
+
+#[test]
+fn test_redeem_position_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, client) = setup_test(&env);
+    let holder = Address::generate(&env);
+    let market_id = 1u64;
+    let winning_outcome_id = 0u32;
+    let shares = 1000i128;
+
+    create_resolved_market(&env, &client.address, market_id, &holder, winning_outcome_id);
+    create_user_position(&env, &client.address, market_id, winning_outcome_id, &holder, shares);
+
+    // Mint tokens directly to the contract so it can pay out
+    let token_addr = get_token_address(&env, &client);
+    let stellar_asset_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+    stellar_asset_client.mint(&client.address, &shares);
+
+    let result = client.redeem_position(&holder, &market_id, &winning_outcome_id);
+
+    assert_eq!(result, shares);
+
+    // Verify position is marked as redeemed
+    env.as_contract(&client.address, || {
+        let position: UserPosition = env.storage().persistent().get(&DataKey::UserPosition(market_id, winning_outcome_id, holder)).unwrap();
+        assert_eq!(position.redeemed, true);
+    });
+}
+
+#[test]
+#[should_panic]
+fn test_redeem_position_losing_outcome() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, client) = setup_test(&env);
+    let holder = Address::generate(&env);
+    let market_id = 1u64;
+    let winning_outcome_id = 0u32;
+    let losing_outcome_id = 1u32;
+    let shares = 1000i128;
+
+    create_resolved_market(&env, &client.address, market_id, &holder, winning_outcome_id);
+    create_user_position(&env, &client.address, market_id, losing_outcome_id, &holder, shares);
+
+    client.redeem_position(&holder, &market_id, &losing_outcome_id);
+}
+
+#[test]
+#[should_panic]
+fn test_redeem_position_already_redeemed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, client) = setup_test(&env);
+    let holder = Address::generate(&env);
+    let market_id = 1u64;
+    let winning_outcome_id = 0u32;
+    let shares = 1000i128;
+
+    create_resolved_market(&env, &client.address, market_id, &holder, winning_outcome_id);
+    create_user_position(&env, &client.address, market_id, winning_outcome_id, &holder, shares);
+
+    // First redeem
+    client.redeem_position(&holder, &market_id, &winning_outcome_id);
+
+    // Second redeem should fail
+    client.redeem_position(&holder, &market_id, &winning_outcome_id);
+}
+
+#[test]
+#[should_panic]
+fn test_redeem_position_market_not_resolved() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, client) = setup_test(&env);
+    let holder = Address::generate(&env);
+    let market_id = 1u64;
+    let outcome_id = 0u32;
+    let shares = 1000i128;
+
+    // Create market but don't resolve it
+    create_test_market(&env, &client.address, market_id, &holder);
+    create_user_position(&env, &client.address, market_id, outcome_id, &holder, shares);
+
+    client.redeem_position(&holder, &market_id, &outcome_id);
+}
+
+fn create_cancelled_market(env: &Env, client_address: &Address, market_id: u64, creator: &Address) -> Market {
+    let mut market = create_test_market(env, client_address, market_id, creator);
+    market.status = crate::types::MarketStatus::Cancelled;
+    env.as_contract(client_address, || {
+        env.storage().persistent().set(&DataKey::Market(market_id), &market);
+    });
+    market
+}
+
+#[test]
+fn test_refund_position_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, client) = setup_test(&env);
+    let holder = Address::generate(&env);
+    let market_id = 1u64;
+    let shares = 1000i128;
+
+    create_cancelled_market(&env, &client.address, market_id, &holder);
+    create_user_position(&env, &client.address, market_id, 0u32, &holder, shares);
+
+    let token_addr = get_token_address(&env, &client);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_addr).mint(&client.address, &shares);
+
+    let result = client.refund_position(&holder, &market_id);
+    assert_eq!(result, shares);
+}
+
+#[test]
+#[should_panic]
+fn test_refund_position_double_refund() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, client) = setup_test(&env);
+    let holder = Address::generate(&env);
+    let market_id = 1u64;
+    let shares = 1000i128;
+
+    create_cancelled_market(&env, &client.address, market_id, &holder);
+    create_user_position(&env, &client.address, market_id, 0u32, &holder, shares);
+
+    let token_addr = get_token_address(&env, &client);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_addr).mint(&client.address, &shares);
+
+    client.refund_position(&holder, &market_id);
+    // second call — all positions already redeemed, total == 0 → PositionNotFound
+    client.refund_position(&holder, &market_id);
+}
+
+#[test]
+#[should_panic]
+fn test_refund_position_market_not_cancelled() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, client) = setup_test(&env);
+    let holder = Address::generate(&env);
+    let market_id = 1u64;
+
+    create_test_market(&env, &client.address, market_id, &holder);
+    create_user_position(&env, &client.address, market_id, 0u32, &holder, 1000);
+
+    client.refund_position(&holder, &market_id);
+}
+
+#[test]
+fn test_batch_redeem_success_and_skip() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, client) = setup_test(&env);
+    let holder = Address::generate(&env);
+    let shares = 500i128;
+
+    // market 1: resolved, winning outcome 0 — should redeem
+    create_resolved_market(&env, &client.address, 1, &holder, 0);
+    create_user_position(&env, &client.address, 1, 0u32, &holder, shares);
+
+    // market 2: resolved but wrong outcome supplied — should skip
+    create_resolved_market(&env, &client.address, 2, &holder, 0);
+    create_user_position(&env, &client.address, 2, 1u32, &holder, shares);
+
+    let token_addr = get_token_address(&env, &client);
+    soroban_sdk::token::StellarAssetClient::new(&env, &token_addr).mint(&client.address, &shares);
+
+    let results = client.batch_redeem(
+        &holder,
+        &soroban_sdk::vec![&env, 1u64, 2u64],
+        &soroban_sdk::vec![&env, 0u32, 1u32],
+    );
+
+    assert_eq!(results.get(0).unwrap(), shares); // redeemed
+    assert_eq!(results.get(1).unwrap(), 0);      // skipped (losing outcome)
+}
+
+#[test]
+#[should_panic]
+fn test_batch_redeem_mismatched_lengths() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, client) = setup_test(&env);
+    let holder = Address::generate(&env);
+
+    client.batch_redeem(
+        &holder,
+        &soroban_sdk::vec![&env, 1u64, 2u64],
+        &soroban_sdk::vec![&env, 0u32],
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_batch_redeem_exceeds_max() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_admin, client) = setup_test(&env);
+    let holder = Address::generate(&env);
+
+    client.batch_redeem(
+        &holder,
+        &soroban_sdk::vec![&env, 1u64, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        &soroban_sdk::vec![&env, 0u32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
 }
