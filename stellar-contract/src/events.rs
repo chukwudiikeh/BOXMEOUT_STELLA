@@ -373,7 +373,8 @@ pub fn position_redeemed(
     outcome_id: u32,
     collateral_out: i128,
 ) {
-    todo!("Emit position_redeemed event")
+    let topics = (Symbol::new(env, "redeemed"), market_id);
+    env.events().publish(topics, (market_id, holder, outcome_id, collateral_out));
 }
 
 /// Emitted when a user is refunded after market cancellation.
@@ -382,7 +383,8 @@ pub fn position_redeemed(
 /// - Topics: [symbol!("refunded"), market_id as Symbol]
 /// - Data:   (market_id: u64, holder: Address, total_refund: i128)
 pub fn position_refunded(env: &Env, market_id: u64, holder: Address, total_refund: i128) {
-    todo!("Emit position_refunded event")
+    let topics = (Symbol::new(env, "refunded"), market_id);
+    env.events().publish(topics, (market_id, holder, total_refund));
 }
 
 /// Emitted once per market successfully redeemed inside a `batch_redeem` call.
