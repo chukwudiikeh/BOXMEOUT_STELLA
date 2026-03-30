@@ -421,6 +421,21 @@ impl PredictionMarketContract {
             .unwrap_or(false)
     }
 
+    /// Return the current market ID counter.
+    /// Indicates how many markets have been created.
+    ///
+    /// # Returns
+    /// - `u64` — the next market ID to be assigned.
+    ///
+    /// # Errors
+    /// - `NotInitialized` if the contract has not been bootstrapped.
+    pub fn get_next_market_id(env: Env) -> Result<u64, PredictionMarketError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::NextMarketId)
+            .ok_or(PredictionMarketError::NotInitialized)
+    }
+
     // =========================================================================
     // SECTION 4 — MARKET CREATION & CONFIGURATION
     // =========================================================================
