@@ -1,5 +1,7 @@
 import express from "express";
 import pinoHttp from "pino-http";
+import { validateEnv } from "./config/env";
+import { setupSwagger } from "./config/swagger";
 import { errorMiddleware } from "./middleware/error.middleware";
 import { rateLimit } from "./middleware/rate-limit.middleware";
 import { AppError } from "./utils/AppError";
@@ -7,14 +9,21 @@ import { logger } from "./utils/logger";
 import authRouter from "./routes/auth.routes";
 import marketRouter from "./routes/market.routes";
 import adminRouter from "./routes/admin.routes";
-import { getPortfolio } from "./api/controllers/MarketController";
-import { getBetsByAddress } from "./api/controllers/MarketController";
+import { getPortfolio, getBetsByAddress, getPlatformStats } from "./api/controllers/MarketController";
+
+// Validate environment variables on startup
+const env = validateEnv();
 
 const app = express();
 
 // Middleware
 app.use(pinoHttp({ logger }));
 app.use(express.json());
+
+// Setup Swagger/OpenAPI documentation
+if (env.NODE_ENV === 'development') {
+  setupSwagger(app);
+}
 
 // Routes
 app.get("/health", (_req, res) => {
@@ -34,6 +43,7 @@ app.use(
 
 app.use("/auth", authRouter);
 app.use("/api/markets", marketRouter);
+app.get("/api/stats", getPlatformStats);
 app.get("/api/portfolio/:address", getPortfolio);
 app.get("/api/bets/:bettor_address", getBetsByAddress);
 app.use("/api/admin", adminRouter);
@@ -42,7 +52,7 @@ app.post("/wallet/withdraw", (_req, res) => res.json({ ok: true }));
 
 // Example route that throws AppError
 app.get("/test-error", (_req, _res, next) => {
-  const error = new AppError(404, "Resource not found", { resource: "user" });
+  const error = AppError.notFound("Resource not found", undefined, { resource: "user" });
   next(error);
 });
 
@@ -54,7 +64,7 @@ app.get("/test-unhandled", (_req, _res) => {
 // Example route with validation error
 app.post("/api/users", (req, res, next) => {
   if (!req.body.email) {
-    const error = new AppError(400, "Validation error", {
+    const error = AppError.badRequest("Validation error", undefined, {
       field: "email",
       reason: "Email is required",
     });
@@ -65,15 +75,18 @@ app.post("/api/users", (req, res, next) => {
 
 // 404 handler - must be before error middleware
 app.use((_req, _res, next) => {
-  next(new AppError(404, "Route not found"));
+  next(AppError.notFound("Route not found"));
 });
 
 // Error handler - must be LAST
 app.use(errorMiddleware);
 
-const PORT = process.env.PORT || 3000;
+const PORT = env.PORT;
 app.listen(PORT, () => {
   logger.info(`Server running on port ${PORT}`);
+  if (env.NODE_ENV === 'development') {
+    logger.info(`Swagger UI available at http://localhost:${PORT}/api/docs`);
+  }
 });
 
 export default app;

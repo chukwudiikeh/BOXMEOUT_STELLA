@@ -103,7 +103,7 @@ export async function getMarketBets(req: Request, res: Response, next: NextFunct
 
     if (address !== undefined) {
       if (typeof address !== 'string' || !StrKey.isValidEd25519PublicKey(address)) {
-        throw new AppError(400, 'Invalid Stellar address format');
+        throw AppError.badRequest('Invalid Stellar address format');
       }
     }
 
@@ -182,11 +182,27 @@ export async function getBetsByAddress(req: Request, res: Response, next: NextFu
     const { bettor_address } = req.params;
 
     if (!StrKey.isValidEd25519PublicKey(bettor_address)) {
-      throw new AppError(400, 'Invalid Stellar address format — must be a valid G... public key');
+      throw AppError.badRequest('Invalid Stellar address format — must be a valid G... public key');
     }
 
     const bets = await MarketService.getBetsByAddress(bettor_address);
     res.status(200).json(bets);
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/stats
+ *
+ * Returns aggregate platform statistics for the home page banner.
+ * Cached for 60 seconds.
+ * Responds 200 with { totalMarkets, activeMarkets, totalVolume, totalBets }.
+ */
+export async function getPlatformStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const stats = await MarketService.getPlatformStats();
+    res.status(200).json(stats);
   } catch (err) {
     next(err);
   }
